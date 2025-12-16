@@ -62,6 +62,7 @@ const getGeminiClient = () => {
 
 const analyzeStockWithGemini = async (symbol: string): Promise<StockAnalysis> => {
   const ai = getGeminiClient();
+  // Ensure .IS suffix is present for the API query
   const ticker = symbol.endsWith('.IS') ? symbol : `${symbol}.IS`;
 
   const systemInstruction = `
@@ -204,7 +205,7 @@ const StockDetailView = ({ data, onClose }: { data: StockAnalysis, onClose: () =
               <ScoreBadge score={data.swingScore} />
             </div>
             <div className="flex items-center gap-4 text-slate-400">
-              <span className="text-2xl font-mono text-white">{data.price} TL</span>
+              <span className="text-2xl font-mono text-white">{data.price.toFixed(2)} TL</span>
               <span className={`flex items-center gap-1 ${data.changePct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                 {data.changePct >= 0 ? <TrendingUp size={16} /> : <TrendingUp size={16} className="rotate-180" />}
                 {data.changePct}%
@@ -461,7 +462,7 @@ export default function App() {
                            <div className="text-xs text-slate-500">Borsa Istanbul</div>
                          </td>
                          <td className="p-4 text-right font-mono text-slate-300">
-                           {stock.price.toFixed(2)} ₺
+                           {stock.price.toFixed(2)} TL
                          </td>
                          <td className={`p-4 text-right font-mono font-medium ${stock.changePct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                            {stock.changePct > 0 ? '+' : ''}{stock.changePct}%
