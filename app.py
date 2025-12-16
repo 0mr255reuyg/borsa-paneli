@@ -69,6 +69,7 @@ def get_batch_data(tickers):
     """
     try:
         # Son 250 gün (yaklaşık 1 yıl) yeterli olacaktır
+        # group_by='ticker' ile hisse bazlı grupluyoruz
         data = yf.download(tickers, period="1y", group_by='ticker', threads=True, progress=False)
         return data
     except Exception as e:
@@ -83,145 +84,159 @@ def calculate_score(df):
     """
     Tek bir hisse senedi DataFrame'i için Swing Skorunu ve durumlarını hesaplar.
     """
+    # Veri yetersizse hesaplama yapma
     if df is None or len(df) < 50:
         return 0, {}, df
 
     # --- İndikatör Hesaplamaları ---
-    # RSI
-    df['RSI'] = ta.rsi(df['Close'], length=14)
-    
-    # MACD
-    macd = ta.macd(df['Close'], fast=12, slow=26, signal=9)
-    df['MACD'] = macd['MACD_12_26_9']
-    df['MACD_Signal'] = macd['MACDs_12_26_9']
-    df['MACD_Hist'] = macd['MACDh_12_26_9']
-    
-    # MFI & Volume SMA
-    df['MFI'] = ta.mfi(df['High'], df['Low'], df['Close'], df['Volume'], length=14)
-    df['Vol_SMA'] = ta.sma(df['Volume'], length=20)
-    
-    # ADX
-    adx = ta.adx(df['High'], df['Low'], df['Close'], length=14)
-    df['ADX'] = adx['ADX_14']
-    df['DMP'] = adx['DMP_14'] # DI+
-    df['DMN'] = adx['DMN_14'] # DI-
-    
-    # SuperTrend
-    st_data = ta.supertrend(df['High'], df['Low'], df['Close'], length=7, multiplier=3)
-    # Sütun isimleri değişkendir, genellikle SUPERT_7_3.0 şeklindedir
-    st_col = [c for c in st_data.columns if c.startswith('SUPERT')][0]
-    df['SuperTrend'] = st_data[st_col]
-    
-    # Bollinger Bands
-    bb = ta.bbands(df['Close'], length=20, std=2)
-    df['BBU'] = bb['BBU_20_2.0']
-    df['BBL'] = bb['BBL_20_2.0']
-    df['BBM'] = bb['BBM_20_2.0'] # SMA
-    df['BBP'] = bb['BBP_20_2.0'] # %B
-    df['BBW'] = bb['BBB_20_2.0'] # Bandwidth for squeeze check
-    
-    # EMA
-    df['EMA20'] = ta.ema(df['Close'], length=20)
-    df['EMA50'] = ta.ema(df['Close'], length=50)
+    try:
+        # RSI
+        df['RSI'] = ta.rsi(df['Close'], length=14)
+        
+        # MACD
+        macd = ta.macd(df['Close'], fast=12, slow=26, signal=9)
+        if macd is not None:
+            df['MACD'] = macd['MACD_12_26_9']
+            df['MACD_Signal'] = macd['MACDs_12_26_9']
+            df['MACD_Hist'] = macd['MACDh_12_26_9']
+        else:
+            return 0, {}, df
+        
+        # MFI & Volume SMA
+        df['MFI'] = ta.mfi(df['High'], df['Low'], df['Close'], df['Volume'], length=14)
+        df['Vol_SMA'] = ta.sma(df['Volume'], length=20)
+        
+        # ADX
+        adx = ta.adx(df['High'], df['Low'], df['Close'], length=14)
+        if adx is not None:
+            df['ADX'] = adx['ADX_14']
+            df['DMP'] = adx['DMP_14'] # DI+
+            df['DMN'] = adx['DMN_14'] # DI-
+        
+        # SuperTrend
+        st_data = ta.supertrend(df['High'], df['Low'], df['Close'], length=7, multiplier=3)
+        if st_data is not None:
+            # Sütun isimleri değişkendir, genellikle SUPERT_7_3.0 şeklindedir
+            st_col = [c for c in st_data.columns if c.startswith('SUPERT')][0]
+            df['SuperTrend'] = st_data[st_col]
+        
+        # Bollinger Bands
+        bb = ta.bbands(df['Close'], length=20, std=2)
+        if bb is not None:
+            df['BBU'] = bb['BBU_20_2.0']
+            df['BBL'] = bb['BBL_20_2.0']
+            df['BBM'] = bb['BBM_20_2.0'] # SMA
+            df['BBP'] = bb['BBP_20_2.0'] # %B
+            df['BBW'] = bb['BBB_20_2.0'] # Bandwidth
+        
+        # EMA
+        df['EMA20'] = ta.ema(df['Close'], length=20)
+        df['EMA50'] = ta.ema(df['Close'], length=50)
 
-    # --- Puanlama Mantığı (Son satır verisi) ---
-    curr = df.iloc[-1]
-    prev = df.iloc[-2]
-    
-    score = 0
-    status = {}
+        # Son satırda NaN varsa (hesaplanamamışsa) temizle
+        df = df.dropna()
+        if len(df) < 2:
+            return 0, {}, df
 
-    # 1. RSI [20 Puan]
-    rsi_val = curr['RSI']
-    if 55 <= rsi_val <= 60:
-        score += 20
-        status['RSI'] = "Mükemmel (55-60)"
-    elif (50 <= rsi_val < 55) or (60 < rsi_val <= 65):
-        score += 15
-        status['RSI'] = "İyi (50-65)"
-    elif (45 <= rsi_val < 50) or (65 < rsi_val <= 70):
-        score += 10
-        status['RSI'] = "Orta (45-70)"
-    else:
-        status['RSI'] = "Zayıf/Aşırı"
+        # --- Puanlama Mantığı (Son satır verisi) ---
+        curr = df.iloc[-1]
+        prev = df.iloc[-2]
+        
+        score = 0
+        status = {}
 
-    # 2. MACD [20 Puan]
-    # Yükseliş Kesişimi: MACD > Signal
-    bullish_cross = curr['MACD'] > curr['MACD_Signal']
-    above_zero = curr['MACD'] > 0
-    hist_increasing = curr['MACD_Hist'] > prev['MACD_Hist']
-    
-    if bullish_cross and above_zero and hist_increasing:
-        score += 20
-        status['MACD'] = "Güçlü AL"
-    elif bullish_cross and above_zero:
-        score += 15
-        status['MACD'] = "AL (>0)"
-    elif bullish_cross and not above_zero:
-        score += 12
-        status['MACD'] = "AL (<0)"
-    else:
-        status['MACD'] = "Nötr/Sat"
+        # 1. RSI [20 Puan]
+        rsi_val = curr['RSI']
+        if 55 <= rsi_val <= 60:
+            score += 20
+            status['RSI'] = "Mükemmel (55-60)"
+        elif (50 <= rsi_val < 55) or (60 < rsi_val <= 65):
+            score += 15
+            status['RSI'] = "İyi (50-65)"
+        elif (45 <= rsi_val < 50) or (65 < rsi_val <= 70):
+            score += 10
+            status['RSI'] = "Orta (45-70)"
+        else:
+            status['RSI'] = "Zayıf/Aşırı"
 
-    # 3. Hacim ve MFI [20 Puan]
-    vol_cond1 = curr['Volume'] > (curr['Vol_SMA'] * 1.5)
-    vol_cond2 = curr['Volume'] > (curr['Vol_SMA'] * 1.2)
-    vol_cond3 = curr['Volume'] > curr['Vol_SMA']
-    mfi_val = curr['MFI']
-    mfi_rising = mfi_val > prev['MFI']
+        # 2. MACD [20 Puan]
+        bullish_cross = curr['MACD'] > curr['MACD_Signal']
+        above_zero = curr['MACD'] > 0
+        hist_increasing = curr['MACD_Hist'] > prev['MACD_Hist']
+        
+        if bullish_cross and above_zero and hist_increasing:
+            score += 20
+            status['MACD'] = "Güçlü AL"
+        elif bullish_cross and above_zero:
+            score += 15
+            status['MACD'] = "AL (>0)"
+        elif bullish_cross and not above_zero:
+            score += 12
+            status['MACD'] = "AL (<0)"
+        else:
+            status['MACD'] = "Nötr/Sat"
 
-    if vol_cond1 and (50 <= mfi_val <= 80):
-        score += 20
-        status['MFI'] = "Balina Girişi"
-    elif vol_cond2 and mfi_rising:
-        score += 15
-        status['MFI'] = "Hacimli Artış"
-    elif vol_cond3:
-        score += 10
-        status['MFI'] = "Hacim > Ort"
-    else:
-        status['MFI'] = "Düşük Hacim"
+        # 3. Hacim ve MFI [20 Puan]
+        vol_cond1 = curr['Volume'] > (curr['Vol_SMA'] * 1.5)
+        vol_cond2 = curr['Volume'] > (curr['Vol_SMA'] * 1.2)
+        vol_cond3 = curr['Volume'] > curr['Vol_SMA']
+        mfi_val = curr['MFI']
+        mfi_rising = mfi_val > prev['MFI']
 
-    # 4. ADX [15 Puan]
-    adx_val = curr['ADX']
-    di_plus = curr['DMP']
-    di_minus = curr['DMN']
-    adx_rising = adx_val > prev['ADX']
+        if vol_cond1 and (50 <= mfi_val <= 80):
+            score += 20
+            status['MFI'] = "Balina Girişi"
+        elif vol_cond2 and mfi_rising:
+            score += 15
+            status['MFI'] = "Hacimli Artış"
+        elif vol_cond3:
+            score += 10
+            status['MFI'] = "Hacim > Ort"
+        else:
+            status['MFI'] = "Düşük Hacim"
 
-    if adx_val > 25 and di_plus > di_minus:
-        score += 15
-        status['ADX'] = "Güçlü Trend"
-    elif (20 <= adx_val <= 25) and adx_rising:
-        score += 10
-        status['ADX'] = "Trend Başlıyor"
-    else:
-        status['ADX'] = "Trendsiz"
+        # 4. ADX [15 Puan]
+        adx_val = curr['ADX']
+        di_plus = curr['DMP']
+        di_minus = curr['DMN']
+        adx_rising = adx_val > prev['ADX']
 
-    # 5. SuperTrend [15 Puan]
-    if curr['Close'] > curr['SuperTrend']:
-        score += 15
-        status['Trend'] = "Yükseliş (Yeşil)"
-    else:
-        status['Trend'] = "Düşüş (Kırmızı)"
+        if adx_val > 25 and di_plus > di_minus:
+            score += 15
+            status['ADX'] = "Güçlü Trend"
+        elif (20 <= adx_val <= 25) and adx_rising:
+            score += 10
+            status['ADX'] = "Trend Başlıyor"
+        else:
+            status['ADX'] = "Trendsiz"
 
-    # 6. Bollinger [10 Puan]
-    bb_p = curr['BBP'] # %B
-    # Sıkışma basit mantık: Bandwidth son 20 günün en düşüğüne yakınsa (burada basitleştirildi)
-    squeeze = curr['BBW'] < df['BBW'].rolling(20).mean().iloc[-1] * 0.9 
-    
-    if bb_p > 0.8:
-        score += 10
-        status['BB'] = "Üst Banda Yakın"
-    elif squeeze and curr['Close'] > curr['BBM']:
-        score += 8
-        status['BB'] = "Sıkışma Kırılımı"
-    elif 0.5 <= bb_p <= 0.8:
-        score += 5
-        status['BB'] = "Orta Bandın Üstü"
-    else:
-        status['BB'] = "Zayıf Konum"
+        # 5. SuperTrend [15 Puan]
+        if curr['Close'] > curr['SuperTrend']:
+            score += 15
+            status['Trend'] = "Yükseliş (Yeşil)"
+        else:
+            status['Trend'] = "Düşüş (Kırmızı)"
 
-    return score, status, df
+        # 6. Bollinger [10 Puan]
+        bb_p = curr['BBP'] # %B
+        squeeze = curr['BBW'] < df['BBW'].rolling(20).mean().iloc[-1] * 0.9 
+        
+        if bb_p > 0.8:
+            score += 10
+            status['BB'] = "Üst Banda Yakın"
+        elif squeeze and curr['Close'] > curr['BBM']:
+            score += 8
+            status['BB'] = "Sıkışma Kırılımı"
+        elif 0.5 <= bb_p <= 0.8:
+            score += 5
+            status['BB'] = "Orta Bandın Üstü"
+        else:
+            status['BB'] = "Zayıf Konum"
+
+        return score, status, df
+    except Exception as e:
+        # Hesaplama hatası olursa (veri eksikliği vs.)
+        return 0, {}, df
 
 # -----------------------------------------------------------------------------
 # 4. ANALİZ YÖNETİCİSİ
@@ -236,15 +251,25 @@ def analyze_market():
     leaderboard = []
     analyzed_stocks = {} # Daha sonra grafik için sakla
 
-    if raw_data is not None:
+    if raw_data is not None and not raw_data.empty:
         # Progress bar
         progress_bar = st.sidebar.progress(0)
         total_stocks = len(BIST_TICKERS)
         
         for i, ticker in enumerate(BIST_TICKERS):
             try:
-                # Multi-index'ten tek hisse verisini al
-                df_ticker = raw_data[ticker].copy()
+                # Veri çekme mantığını güçlendirelim
+                # Multi-index yapısında bazen ticker ismi en üstte olur
+                if isinstance(raw_data.columns, pd.MultiIndex):
+                    try:
+                        df_ticker = raw_data[ticker].copy()
+                    except KeyError:
+                        # Eğer ticker bulunamazsa (bazen Yahoo eksik döner) geç
+                        continue
+                else:
+                    # Tek hisse dönerse yapı farklı olabilir, şimdilik basit tutalım
+                    df_ticker = raw_data.copy()
+
                 df_ticker = df_ticker.dropna()
                 
                 if df_ticker.empty:
@@ -252,27 +277,28 @@ def analyze_market():
                     
                 score, status, df_calc = calculate_score(df_ticker)
                 
-                # Temiz Sembol Adı
-                clean_symbol = ticker.replace(".IS", "")
-                
-                # Son Fiyat ve Değişim
-                last_price = df_calc['Close'].iloc[-1]
-                prev_price = df_calc['Close'].iloc[-2]
-                pct_change = ((last_price - prev_price) / prev_price) * 100
-                
-                leaderboard.append({
-                    "Sembol": clean_symbol,
-                    "Puan": score,
-                    "Fiyat": last_price,
-                    "Değişim %": pct_change,
-                    "Tam_Sembol": ticker,
-                    "Status": status # Detaylar için
-                })
-                
-                analyzed_stocks[clean_symbol] = df_calc
+                # Sadece puanı 0'dan büyük olanları listeye al (isteğe bağlı)
+                if score > 0:
+                    clean_symbol = ticker.replace(".IS", "")
+                    
+                    last_price = df_calc['Close'].iloc[-1]
+                    prev_price = df_calc['Close'].iloc[-2]
+                    pct_change = ((last_price - prev_price) / prev_price) * 100
+                    
+                    leaderboard.append({
+                        "Sembol": clean_symbol,
+                        "Puan": score,
+                        "Fiyat": last_price,
+                        "Değişim %": pct_change,
+                        "Tam_Sembol": ticker,
+                        "Status": status
+                    })
+                    
+                    analyzed_stocks[clean_symbol] = df_calc
                 
             except Exception as e:
-                # Bazı hisselerde veri eksikliği olabilir, geçiyoruz
+                # Hata ayıklamak için geçici print (Sidebar'da görünürse anlarız)
+                # st.sidebar.write(f"Hata {ticker}: {e}")
                 continue
             
             # Progress bar güncelle
@@ -295,14 +321,15 @@ def analyze_market():
 st.sidebar.title("🚀 BIST Swing Pro")
 st.sidebar.markdown("---")
 
-df_lb, stock_data_dict = analyze_market()
+with st.spinner('Piyasa verileri taranıyor...'):
+    df_lb, stock_data_dict = analyze_market()
 
 if not df_lb.empty:
     st.sidebar.subheader("🏆 Liderlik Tablosu")
     
-    # Basit bir tablo gösterimi
+    # Tabloyu göster
     st.sidebar.dataframe(
-        df_lb[['Sembol', 'Puan']],
+        df_lb[['Sembol', 'Puan', 'Fiyat']],
         hide_index=True,
         use_container_width=True,
         height=400
@@ -317,7 +344,7 @@ if not df_lb.empty:
         options=df_lb['Sembol'].tolist()
     )
 else:
-    st.sidebar.warning("Veri çekilemedi. Lütfen bağlantınızı kontrol edin.")
+    st.error("Veri alınamadı veya piyasa kapalı olabilir. Lütfen sayfayı yenileyin.")
     selected_symbol = None
 
 # --- ANA EKRAN (ODAK MODU) ---
@@ -332,7 +359,6 @@ if selected_symbol and selected_symbol in stock_data_dict:
     col_header1, col_header2 = st.columns([3, 1])
     
     with col_header1:
-        # Şirket adı eşleştirmesi (Demo için basit tutuldu, geliştirilebilir)
         st.title(f"{selected_symbol}")
         st.caption(f"BIST 100 / {selected_symbol} Analiz Raporu")
     
@@ -349,7 +375,6 @@ if selected_symbol and selected_symbol in stock_data_dict:
 
     # 2. GRAFİK (PLOTLY)
     
-    # Mum grafiği
     fig = go.Figure()
 
     # Candlestick
@@ -362,13 +387,11 @@ if selected_symbol and selected_symbol in stock_data_dict:
         name='Fiyat'
     ))
 
-    # EMA 20
+    # EMA 20 & 50
     fig.add_trace(go.Scatter(
         x=df_chart.index, y=df_chart['EMA20'],
         line=dict(color='orange', width=1), name='EMA 20'
     ))
-
-    # EMA 50
     fig.add_trace(go.Scatter(
         x=df_chart.index, y=df_chart['EMA50'],
         line=dict(color='blue', width=1), name='EMA 50'
@@ -382,7 +405,7 @@ if selected_symbol and selected_symbol in stock_data_dict:
     fig.add_trace(go.Scatter(
         x=df_chart.index, y=df_chart['BBL'],
         line=dict(color='gray', width=1, dash='dot'), name='BB Alt', opacity=0.5,
-        fill='tonexty' # Üst ve alt arasını boyar
+        fill='tonexty' 
     ))
 
     # Düzen Ayarları
@@ -397,7 +420,6 @@ if selected_symbol and selected_symbol in stock_data_dict:
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
     
-    # Gridleri koyulaştır
     fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='#333')
     fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='#333')
 
@@ -409,9 +431,8 @@ if selected_symbol and selected_symbol in stock_data_dict:
     
     c1, c2, c3, c4, c5 = st.columns(5)
     
-    # Renk kodu fonksiyonu
     def get_color(val, threshold=50):
-        return "#4CAF50" if val >= threshold else "#FF5252" # Yeşil / Kırmızı
+        return "#4CAF50" if val >= threshold else "#FF5252"
 
     score_color = get_color(row_data['Puan'], 70)
     
@@ -458,4 +479,5 @@ if selected_symbol and selected_symbol in stock_data_dict:
         """, unsafe_allow_html=True)
 
 else:
-    st.info("Lütfen kenar çubuğundan analiz edilecek bir hisse seçin.")
+    # Veri gelmezse boş ekran kalmasın diye
+    pass
