@@ -1,483 +1,499 @@
-import streamlit as st
-import yfinance as yf
-import pandas as pd
-import pandas_ta as ta
-import plotly.graph_objects as go
-from datetime import datetime, timedelta
-import numpy as np
+import React, { useState, useEffect } from 'react';
+import { createRoot } from 'react-dom/client';
+import { GoogleGenAI, Type } from "@google/genai";
+import { 
+  LineChart, 
+  Search, 
+  Activity, 
+  BarChart2, 
+  TrendingUp, 
+  AlertCircle,
+  CheckCircle2,
+  XCircle,
+  Play,
+  Loader2,
+  Info
+} from 'lucide-react';
 
-# -----------------------------------------------------------------------------
-# 1. SAYFA YAPILANDIRMASI VE STİL
-# -----------------------------------------------------------------------------
-st.set_page_config(
-    page_title="BIST Swing Trader Pro",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+// --- Constants & Config ---
 
-# Özel CSS ile arayüzü iyileştirme
-st.markdown("""
-<style>
-    .metric-box {
-        background-color: #262730;
-        border: 1px solid #464b5f;
-        padding: 15px;
-        border-radius: 5px;
-        text-align: center;
-        margin-bottom: 10px;
+// A subset of BIST stocks for demonstration to avoid hitting rate limits immediately.
+// In a full production build, this would include all XTUM.
+const DEFAULT_BIST_STOCKS = [
+  "THYAO", "ASELS", "KCHOL", "AKBNK", "GARAN", "SISE", "EREGL", "TUPRS", "BIMAS", "SASA",
+  "HEKTS", "PETKM", "ISCTR", "SAHOL", "FROTO", "YKBNK", "ENKAI", "TOASO", "PGSUS", "TCELL",
+  "ASTOR", "EUPWR", "KONTR", "GESAN", "ODAS", "KOZAL", "KRDMD", "VESTL", "ARCLK", "ALARK"
+];
+
+// --- Types ---
+
+interface ScoringDetail {
+  criteria: string;
+  score: number;
+  maxScore: number;
+  reason: string;
+}
+
+interface StockAnalysis {
+  symbol: string;
+  price: number;
+  changePct: number;
+  swingScore: number;
+  summary: string;
+  details: {
+    rsi: number;
+    macd_bullish: boolean;
+    volume_surge: boolean;
+    adx_trend: boolean;
+    supertrend_buy: boolean;
+    bollinger_squeeze: boolean;
+  };
+  scoringBreakdown: ScoringDetail[];
+  timestamp: string;
+}
+
+// --- Gemini API Service ---
+
+const getGeminiClient = () => {
+  const apiKey = process.env.API_KEY;
+  if (!apiKey) throw new Error("API Key not found");
+  return new GoogleGenAI({ apiKey });
+};
+
+const analyzeStockWithGemini = async (symbol: string): Promise<StockAnalysis> => {
+  const ai = getGeminiClient();
+  const ticker = symbol.endsWith('.IS') ? symbol : `${symbol}.IS`;
+
+  const systemInstruction = `
+    You are an expert Technical Analyst for Borsa Istanbul (BIST).
+    Your task is to search for real-time technical indicators for the stock ${ticker} and calculate a "Swing Trading Score" (0-100) based on EXACT rules.
+    
+    CRITICAL: You MUST use the 'googleSearch' tool to find the LATEST price and indicator values (RSI, MACD, Volume, ADX, SuperTrend, Bollinger Bands) for ${ticker}.
+    
+    SCORING ALGORITHM (Total 100 Points):
+    
+    1. RSI (14) [Max 20 Pts]:
+       - 55-60: +20 (Perfect)
+       - 50-55 OR 60-65: +15 (Good)
+       - 45-50 OR 65-70: +10 (Medium)
+       - Else: 0
+       
+    2. MACD (12, 26, 9) [Max 20 Pts]:
+       - Bullish Cross (MACD > Signal) AND MACD > 0 AND Histogram Increasing: +20
+       - MACD > Signal AND MACD > 0: +15
+       - MACD > Signal (but < 0): +12
+       - Else: 0
+       
+    3. Volume & MFI (14) [Max 20 Pts]:
+       - Vol > (Avg20 * 1.5) AND MFI 50-80: +20 (Whale)
+       - Vol > (Avg20 * 1.2) AND MFI Increasing: +15
+       - Vol > Avg20: +10
+       - Else: 0
+       
+    4. ADX (14) [Max 15 Pts]:
+       - ADX > 25 AND DI+ > DI-: +15 (Strong Trend)
+       - ADX 20-25 AND ADX Rising: +10
+       - Else: 0
+       
+    5. SuperTrend (7, 3) [Max 15 Pts]:
+       - Price > SuperTrend (Buy Signal): +15
+       - Else: 0
+       
+    6. Bollinger Bands (20, 2) [Max 10 Pts]:
+       - %B > 0.8: +10
+       - Squeeze (Low Bandwidth) AND Price > Mid: +8
+       - %B 0.5-0.8: +5
+       - Else: 0
+  `;
+
+  const response = await ai.models.generateContent({
+    model: "gemini-2.5-flash",
+    contents: `Analyze ${ticker}. Fetch current data and apply the scoring rules. Return the result in JSON format.`,
+    config: {
+      tools: [{ googleSearch: {} }],
+      systemInstruction: systemInstruction,
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          symbol: { type: Type.STRING },
+          price: { type: Type.NUMBER },
+          changePct: { type: Type.NUMBER },
+          swingScore: { type: Type.NUMBER },
+          summary: { type: Type.STRING },
+          details: {
+            type: Type.OBJECT,
+            properties: {
+              rsi: { type: Type.NUMBER },
+              macd_bullish: { type: Type.BOOLEAN },
+              volume_surge: { type: Type.BOOLEAN },
+              adx_trend: { type: Type.BOOLEAN },
+              supertrend_buy: { type: Type.BOOLEAN },
+              bollinger_squeeze: { type: Type.BOOLEAN },
+            }
+          },
+          scoringBreakdown: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                criteria: { type: Type.STRING },
+                score: { type: Type.NUMBER },
+                maxScore: { type: Type.NUMBER },
+                reason: { type: Type.STRING }
+              }
+            }
+          }
+        }
+      }
     }
-    .metric-title {
-        color: #fafafa;
-        font-size: 0.9em;
-        font-weight: bold;
-        margin-bottom: 5px;
-    }
-    .metric-value {
-        font-size: 1.2em;
-        font-weight: bold;
-    }
-    .big-font {
-        font-size: 24px !important;
-        font-weight: bold;
-    }
-    div[data-testid="stMetricValue"] {
-        font-size: 1.5rem;
-    }
-</style>
-""", unsafe_allow_html=True)
+  });
 
-# -----------------------------------------------------------------------------
-# 2. VERİ VE HİSSE LİSTESİ
-# -----------------------------------------------------------------------------
+  if (response.text) {
+    const data = JSON.parse(response.text) as StockAnalysis;
+    data.timestamp = new Date().toLocaleTimeString();
+    return data;
+  }
+  throw new Error("No data returned from AI");
+};
 
-# Performans için BIST 100 ve Popüler Hisselerden oluşan geniş bir liste
-BIST_TICKERS = [
-    "THYAO.IS", "GARAN.IS", "AKBNK.IS", "ISCTR.IS", "YKBNK.IS", "VAKBN.IS", "HALKB.IS", "TUPRS.IS", 
-    "EREGL.IS", "KCHOL.IS", "SAHOL.IS", "SISE.IS", "BIMAS.IS", "ASELS.IS", "FROTO.IS", "TOASO.IS", 
-    "TTKOM.IS", "TCELL.IS", "PETKM.IS", "HEKTS.IS", "SASA.IS", "KOZAL.IS", "KOZAA.IS", "IPEKE.IS", 
-    "KRDMD.IS", "EKGYO.IS", "ODAS.IS", "ARCLK.IS", "ENKAI.IS", "VESTL.IS", "ALARK.IS", "TAVHL.IS", 
-    "MGROS.IS", "AEFES.IS", "AGHOL.IS", "AKSEN.IS", "ASTOR.IS", "EUPWR.IS", "KONTR.IS", "SMRTG.IS",
-    "GESAN.IS", "YEOTK.IS", "ALFAS.IS", "CVKMD.IS", "KOPOL.IS", "EBEBK.IS", "TABGD.IS", "REEDR.IS",
-    "HATSN.IS", "TARKM.IS", "DOAS.IS", "PGSUS.IS", "ENJSA.IS", "SOKM.IS", "ULKER.IS", "TKFEN.IS"
-]
+// --- Components ---
 
-@st.cache_data(ttl=3600)  # 1 saatlik önbellek
-def get_batch_data(tickers):
-    """
-    Tüm hisseler için toplu veri çeker (Performans optimizasyonu).
-    """
-    try:
-        # Son 250 gün (yaklaşık 1 yıl) yeterli olacaktır
-        # group_by='ticker' ile hisse bazlı grupluyoruz
-        data = yf.download(tickers, period="1y", group_by='ticker', threads=True, progress=False)
-        return data
-    except Exception as e:
-        st.error(f"Veri çekme hatası: {e}")
-        return None
+const ProgressBar = ({ progress, total, currentStock }: { progress: number, total: number, currentStock: string }) => (
+  <div className="w-full bg-slate-800 rounded-lg p-4 mb-6 border border-slate-700 animate-in fade-in slide-in-from-top-4">
+    <div className="flex justify-between mb-2 text-sm text-slate-300">
+      <span>Analyzing Markets...</span>
+      <span>{Math.round((progress / total) * 100)}%</span>
+    </div>
+    <div className="w-full bg-slate-700 rounded-full h-2.5 mb-2">
+      <div 
+        className="bg-blue-500 h-2.5 rounded-full transition-all duration-300 ease-out" 
+        style={{ width: `${(progress / total) * 100}%` }}
+      ></div>
+    </div>
+    <div className="text-xs text-slate-400 flex items-center gap-2">
+      <Loader2 className="w-3 h-3 animate-spin" />
+      Processing: <span className="font-mono text-blue-400">{currentStock}.IS</span>
+    </div>
+  </div>
+);
 
-# -----------------------------------------------------------------------------
-# 3. MANTIK VE HESAPLAMA MOTORU
-# -----------------------------------------------------------------------------
+const ScoreBadge = ({ score }: { score: number }) => {
+  let colorClass = "bg-slate-700 text-slate-300 border-slate-600";
+  if (score >= 75) colorClass = "bg-green-900/30 text-green-400 border-green-700/50";
+  else if (score >= 50) colorClass = "bg-yellow-900/30 text-yellow-400 border-yellow-700/50";
+  else if (score > 0) colorClass = "bg-red-900/30 text-red-400 border-red-700/50";
 
-def calculate_score(df):
-    """
-    Tek bir hisse senedi DataFrame'i için Swing Skorunu ve durumlarını hesaplar.
-    """
-    # Veri yetersizse hesaplama yapma
-    if df is None or len(df) < 50:
-        return 0, {}, df
+  return (
+    <div className={`px-3 py-1 rounded-full border ${colorClass} font-bold text-sm inline-flex items-center gap-1`}>
+      {score} / 100
+    </div>
+  );
+};
 
-    # --- İndikatör Hesaplamaları ---
-    try:
-        # RSI
-        df['RSI'] = ta.rsi(df['Close'], length=14)
+const StockDetailView = ({ data, onClose }: { data: StockAnalysis, onClose: () => void }) => {
+  return (
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+      <div className="bg-slate-900 border border-slate-700 rounded-xl w-full max-w-4xl max-h-[90vh] overflow-y-auto shadow-2xl flex flex-col">
         
-        # MACD
-        macd = ta.macd(df['Close'], fast=12, slow=26, signal=9)
-        if macd is not None:
-            df['MACD'] = macd['MACD_12_26_9']
-            df['MACD_Signal'] = macd['MACDs_12_26_9']
-            df['MACD_Hist'] = macd['MACDh_12_26_9']
-        else:
-            return 0, {}, df
-        
-        # MFI & Volume SMA
-        df['MFI'] = ta.mfi(df['High'], df['Low'], df['Close'], df['Volume'], length=14)
-        df['Vol_SMA'] = ta.sma(df['Volume'], length=20)
-        
-        # ADX
-        adx = ta.adx(df['High'], df['Low'], df['Close'], length=14)
-        if adx is not None:
-            df['ADX'] = adx['ADX_14']
-            df['DMP'] = adx['DMP_14'] # DI+
-            df['DMN'] = adx['DMN_14'] # DI-
-        
-        # SuperTrend
-        st_data = ta.supertrend(df['High'], df['Low'], df['Close'], length=7, multiplier=3)
-        if st_data is not None:
-            # Sütun isimleri değişkendir, genellikle SUPERT_7_3.0 şeklindedir
-            st_col = [c for c in st_data.columns if c.startswith('SUPERT')][0]
-            df['SuperTrend'] = st_data[st_col]
-        
-        # Bollinger Bands
-        bb = ta.bbands(df['Close'], length=20, std=2)
-        if bb is not None:
-            df['BBU'] = bb['BBU_20_2.0']
-            df['BBL'] = bb['BBL_20_2.0']
-            df['BBM'] = bb['BBM_20_2.0'] # SMA
-            df['BBP'] = bb['BBP_20_2.0'] # %B
-            df['BBW'] = bb['BBB_20_2.0'] # Bandwidth
-        
-        # EMA
-        df['EMA20'] = ta.ema(df['Close'], length=20)
-        df['EMA50'] = ta.ema(df['Close'], length=50)
-
-        # Son satırda NaN varsa (hesaplanamamışsa) temizle
-        df = df.dropna()
-        if len(df) < 2:
-            return 0, {}, df
-
-        # --- Puanlama Mantığı (Son satır verisi) ---
-        curr = df.iloc[-1]
-        prev = df.iloc[-2]
-        
-        score = 0
-        status = {}
-
-        # 1. RSI [20 Puan]
-        rsi_val = curr['RSI']
-        if 55 <= rsi_val <= 60:
-            score += 20
-            status['RSI'] = "Mükemmel (55-60)"
-        elif (50 <= rsi_val < 55) or (60 < rsi_val <= 65):
-            score += 15
-            status['RSI'] = "İyi (50-65)"
-        elif (45 <= rsi_val < 50) or (65 < rsi_val <= 70):
-            score += 10
-            status['RSI'] = "Orta (45-70)"
-        else:
-            status['RSI'] = "Zayıf/Aşırı"
-
-        # 2. MACD [20 Puan]
-        bullish_cross = curr['MACD'] > curr['MACD_Signal']
-        above_zero = curr['MACD'] > 0
-        hist_increasing = curr['MACD_Hist'] > prev['MACD_Hist']
-        
-        if bullish_cross and above_zero and hist_increasing:
-            score += 20
-            status['MACD'] = "Güçlü AL"
-        elif bullish_cross and above_zero:
-            score += 15
-            status['MACD'] = "AL (>0)"
-        elif bullish_cross and not above_zero:
-            score += 12
-            status['MACD'] = "AL (<0)"
-        else:
-            status['MACD'] = "Nötr/Sat"
-
-        # 3. Hacim ve MFI [20 Puan]
-        vol_cond1 = curr['Volume'] > (curr['Vol_SMA'] * 1.5)
-        vol_cond2 = curr['Volume'] > (curr['Vol_SMA'] * 1.2)
-        vol_cond3 = curr['Volume'] > curr['Vol_SMA']
-        mfi_val = curr['MFI']
-        mfi_rising = mfi_val > prev['MFI']
-
-        if vol_cond1 and (50 <= mfi_val <= 80):
-            score += 20
-            status['MFI'] = "Balina Girişi"
-        elif vol_cond2 and mfi_rising:
-            score += 15
-            status['MFI'] = "Hacimli Artış"
-        elif vol_cond3:
-            score += 10
-            status['MFI'] = "Hacim > Ort"
-        else:
-            status['MFI'] = "Düşük Hacim"
-
-        # 4. ADX [15 Puan]
-        adx_val = curr['ADX']
-        di_plus = curr['DMP']
-        di_minus = curr['DMN']
-        adx_rising = adx_val > prev['ADX']
-
-        if adx_val > 25 and di_plus > di_minus:
-            score += 15
-            status['ADX'] = "Güçlü Trend"
-        elif (20 <= adx_val <= 25) and adx_rising:
-            score += 10
-            status['ADX'] = "Trend Başlıyor"
-        else:
-            status['ADX'] = "Trendsiz"
-
-        # 5. SuperTrend [15 Puan]
-        if curr['Close'] > curr['SuperTrend']:
-            score += 15
-            status['Trend'] = "Yükseliş (Yeşil)"
-        else:
-            status['Trend'] = "Düşüş (Kırmızı)"
-
-        # 6. Bollinger [10 Puan]
-        bb_p = curr['BBP'] # %B
-        squeeze = curr['BBW'] < df['BBW'].rolling(20).mean().iloc[-1] * 0.9 
-        
-        if bb_p > 0.8:
-            score += 10
-            status['BB'] = "Üst Banda Yakın"
-        elif squeeze and curr['Close'] > curr['BBM']:
-            score += 8
-            status['BB'] = "Sıkışma Kırılımı"
-        elif 0.5 <= bb_p <= 0.8:
-            score += 5
-            status['BB'] = "Orta Bandın Üstü"
-        else:
-            status['BB'] = "Zayıf Konum"
-
-        return score, status, df
-    except Exception as e:
-        # Hesaplama hatası olursa (veri eksikliği vs.)
-        return 0, {}, df
-
-# -----------------------------------------------------------------------------
-# 4. ANALİZ YÖNETİCİSİ
-# -----------------------------------------------------------------------------
-
-def analyze_market():
-    """
-    Tüm market verisini çeker, işler ve liderlik tablosunu oluşturur.
-    """
-    raw_data = get_batch_data(BIST_TICKERS)
-    
-    leaderboard = []
-    analyzed_stocks = {} # Daha sonra grafik için sakla
-
-    if raw_data is not None and not raw_data.empty:
-        # Progress bar
-        progress_bar = st.sidebar.progress(0)
-        total_stocks = len(BIST_TICKERS)
-        
-        for i, ticker in enumerate(BIST_TICKERS):
-            try:
-                # Veri çekme mantığını güçlendirelim
-                # Multi-index yapısında bazen ticker ismi en üstte olur
-                if isinstance(raw_data.columns, pd.MultiIndex):
-                    try:
-                        df_ticker = raw_data[ticker].copy()
-                    except KeyError:
-                        # Eğer ticker bulunamazsa (bazen Yahoo eksik döner) geç
-                        continue
-                else:
-                    # Tek hisse dönerse yapı farklı olabilir, şimdilik basit tutalım
-                    df_ticker = raw_data.copy()
-
-                df_ticker = df_ticker.dropna()
-                
-                if df_ticker.empty:
-                    continue
-                    
-                score, status, df_calc = calculate_score(df_ticker)
-                
-                # Sadece puanı 0'dan büyük olanları listeye al (isteğe bağlı)
-                if score > 0:
-                    clean_symbol = ticker.replace(".IS", "")
-                    
-                    last_price = df_calc['Close'].iloc[-1]
-                    prev_price = df_calc['Close'].iloc[-2]
-                    pct_change = ((last_price - prev_price) / prev_price) * 100
-                    
-                    leaderboard.append({
-                        "Sembol": clean_symbol,
-                        "Puan": score,
-                        "Fiyat": last_price,
-                        "Değişim %": pct_change,
-                        "Tam_Sembol": ticker,
-                        "Status": status
-                    })
-                    
-                    analyzed_stocks[clean_symbol] = df_calc
-                
-            except Exception as e:
-                # Hata ayıklamak için geçici print (Sidebar'da görünürse anlarız)
-                # st.sidebar.write(f"Hata {ticker}: {e}")
-                continue
-            
-            # Progress bar güncelle
-            progress_bar.progress((i + 1) / total_stocks)
-        
-        progress_bar.empty()
-
-    # DataFrame'e çevir ve Puan'a göre sırala
-    df_leaderboard = pd.DataFrame(leaderboard)
-    if not df_leaderboard.empty:
-        df_leaderboard = df_leaderboard.sort_values(by="Puan", ascending=False).reset_index(drop=True)
-        
-    return df_leaderboard, analyzed_stocks
-
-# -----------------------------------------------------------------------------
-# 5. KULLANICI ARAYÜZÜ (UI)
-# -----------------------------------------------------------------------------
-
-# --- KENAR ÇUBUĞU ---
-st.sidebar.title("🚀 BIST Swing Pro")
-st.sidebar.markdown("---")
-
-with st.spinner('Piyasa verileri taranıyor...'):
-    df_lb, stock_data_dict = analyze_market()
-
-if not df_lb.empty:
-    st.sidebar.subheader("🏆 Liderlik Tablosu")
-    
-    # Tabloyu göster
-    st.sidebar.dataframe(
-        df_lb[['Sembol', 'Puan', 'Fiyat']],
-        hide_index=True,
-        use_container_width=True,
-        height=400
-    )
-    
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🔍 Hisse Seçimi")
-    
-    # Seçim Kutusu
-    selected_symbol = st.sidebar.selectbox(
-        "Analiz edilecek hisseyi seçin:",
-        options=df_lb['Sembol'].tolist()
-    )
-else:
-    st.error("Veri alınamadı veya piyasa kapalı olabilir. Lütfen sayfayı yenileyin.")
-    selected_symbol = None
-
-# --- ANA EKRAN (ODAK MODU) ---
-
-if selected_symbol and selected_symbol in stock_data_dict:
-    # Seçilen hissenin verilerini al
-    row_data = df_lb[df_lb['Sembol'] == selected_symbol].iloc[0]
-    df_chart = stock_data_dict[selected_symbol]
-    status_dict = row_data['Status']
-    
-    # 1. BAŞLIK BÖLÜMÜ
-    col_header1, col_header2 = st.columns([3, 1])
-    
-    with col_header1:
-        st.title(f"{selected_symbol}")
-        st.caption(f"BIST 100 / {selected_symbol} Analiz Raporu")
-    
-    with col_header2:
-        price_color = "green" if row_data['Değişim %'] >= 0 else "red"
-        st.markdown(f"""
-        <div style="text-align: right;">
-            <div class="big-font">{row_data['Fiyat']:.2f} TL</div>
-            <div style="color: {price_color}; font-weight: bold; font-size: 18px;">
-                {row_data['Değişim %']:.2f}%
+        {/* Header */}
+        <div className="p-6 border-b border-slate-800 flex justify-between items-start sticky top-0 bg-slate-900 z-10">
+          <div>
+            <div className="flex items-center gap-3 mb-1">
+              <h2 className="text-3xl font-bold text-white tracking-tight">{data.symbol}.IS</h2>
+              <ScoreBadge score={data.swingScore} />
             </div>
+            <div className="flex items-center gap-4 text-slate-400">
+              <span className="text-2xl font-mono text-white">{data.price} TL</span>
+              <span className={`flex items-center gap-1 ${data.changePct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                {data.changePct >= 0 ? <TrendingUp size={16} /> : <TrendingUp size={16} className="rotate-180" />}
+                {data.changePct}%
+              </span>
+              <span className="text-sm border-l border-slate-700 pl-4">Updated: {data.timestamp}</span>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white transition-colors">
+            <XCircle size={24} />
+          </button>
         </div>
-        """, unsafe_allow_html=True)
 
-    # 2. GRAFİK (PLOTLY)
-    
-    fig = go.Figure()
+        {/* Content */}
+        <div className="p-6 grid grid-cols-1 md:grid-cols-3 gap-6">
+          
+          {/* Main Summary */}
+          <div className="md:col-span-2 space-y-6">
+            <div className="bg-slate-800/50 rounded-lg p-5 border border-slate-700">
+              <h3 className="text-lg font-semibold text-white mb-3 flex items-center gap-2">
+                <Activity className="text-blue-400" size={20} />
+                AI Analysis Summary
+              </h3>
+              <p className="text-slate-300 leading-relaxed">{data.summary}</p>
+            </div>
 
-    # Candlestick
-    fig.add_trace(go.Candlestick(
-        x=df_chart.index,
-        open=df_chart['Open'],
-        high=df_chart['High'],
-        low=df_chart['Low'],
-        close=df_chart['Close'],
-        name='Fiyat'
-    ))
+            <div className="space-y-3">
+               <h3 className="text-lg font-semibold text-white mb-3">Scoring Breakdown</h3>
+               {data.scoringBreakdown.map((item, idx) => (
+                 <div key={idx} className="bg-slate-800/30 p-4 rounded-lg border border-slate-700/50 flex flex-col gap-2">
+                    <div className="flex justify-between items-center">
+                      <span className="font-medium text-slate-200">{item.criteria}</span>
+                      <span className={`text-sm font-bold px-2 py-0.5 rounded ${item.score > 0 ? 'bg-green-900/50 text-green-400' : 'bg-slate-700 text-slate-400'}`}>
+                        +{item.score} Pts
+                      </span>
+                    </div>
+                    <p className="text-sm text-slate-400">{item.reason}</p>
+                 </div>
+               ))}
+            </div>
+          </div>
 
-    # EMA 20 & 50
-    fig.add_trace(go.Scatter(
-        x=df_chart.index, y=df_chart['EMA20'],
-        line=dict(color='orange', width=1), name='EMA 20'
-    ))
-    fig.add_trace(go.Scatter(
-        x=df_chart.index, y=df_chart['EMA50'],
-        line=dict(color='blue', width=1), name='EMA 50'
-    ))
+          {/* Key Metrics Sidebar */}
+          <div className="space-y-4">
+             <div className="bg-slate-800/50 p-5 rounded-lg border border-slate-700">
+                <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                  <BarChart2 className="text-purple-400" size={20} />
+                  Technical Indicators
+                </h3>
+                
+                <div className="space-y-4">
+                  <div className="flex justify-between items-center pb-2 border-b border-slate-700/50">
+                    <span className="text-slate-400 text-sm">RSI (14)</span>
+                    <span className={`font-mono font-bold ${data.details.rsi > 70 || data.details.rsi < 30 ? 'text-yellow-400' : 'text-white'}`}>
+                      {data.details.rsi?.toFixed(2)}
+                    </span>
+                  </div>
+                  
+                  <div className="flex justify-between items-center pb-2 border-b border-slate-700/50">
+                    <span className="text-slate-400 text-sm">MACD Signal</span>
+                    {data.details.macd_bullish ? 
+                      <span className="text-green-400 flex items-center gap-1 text-sm font-bold"><CheckCircle2 size={14}/> Bullish</span> : 
+                      <span className="text-slate-500 text-sm">Neutral/Bear</span>
+                    }
+                  </div>
 
-    # Bollinger Bands
-    fig.add_trace(go.Scatter(
-        x=df_chart.index, y=df_chart['BBU'],
-        line=dict(color='gray', width=1, dash='dot'), name='BB Üst', opacity=0.5
-    ))
-    fig.add_trace(go.Scatter(
-        x=df_chart.index, y=df_chart['BBL'],
-        line=dict(color='gray', width=1, dash='dot'), name='BB Alt', opacity=0.5,
-        fill='tonexty' 
-    ))
+                  <div className="flex justify-between items-center pb-2 border-b border-slate-700/50">
+                    <span className="text-slate-400 text-sm">Volume</span>
+                    {data.details.volume_surge ? 
+                      <span className="text-green-400 flex items-center gap-1 text-sm font-bold"><Activity size={14}/> High</span> : 
+                      <span className="text-slate-500 text-sm">Normal</span>
+                    }
+                  </div>
 
-    # Düzen Ayarları
-    fig.update_layout(
-        height=600,
-        margin=dict(l=20, r=20, t=30, b=20),
-        paper_bgcolor="#0e1117",
-        plot_bgcolor="#0e1117",
-        font=dict(color="white"),
-        xaxis_rangeslider_visible=False,
-        hovermode='x unified',
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-    )
-    
-    fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='#333')
-    fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='#333')
+                   <div className="flex justify-between items-center pb-2 border-b border-slate-700/50">
+                    <span className="text-slate-400 text-sm">SuperTrend</span>
+                    {data.details.supertrend_buy ? 
+                      <span className="text-green-400 flex items-center gap-1 text-sm font-bold">BUY</span> : 
+                      <span className="text-red-400 flex items-center gap-1 text-sm font-bold">SELL</span>
+                    }
+                  </div>
+                  
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-400 text-sm">Bollinger</span>
+                    {data.details.bollinger_squeeze ? 
+                      <span className="text-blue-400 flex items-center gap-1 text-sm font-bold">Squeeze</span> : 
+                      <span className="text-slate-500 text-sm">Normal</span>
+                    }
+                  </div>
+                </div>
+             </div>
+             
+             <div className="bg-blue-900/20 p-4 rounded-lg border border-blue-800/30 text-xs text-blue-200">
+               <div className="flex gap-2 mb-2">
+                 <Info size={16} />
+                 <span className="font-bold">Pro Tip</span>
+               </div>
+               High Swing Scores (>70) indicate a strong probability of short-term upward momentum based on multiple confirming indicators.
+             </div>
+          </div>
 
-    st.plotly_chart(fig, use_container_width=True)
-
-    # 3. VERİ ŞERİDİ (GRAFİK ALTI)
-    
-    st.markdown("### 📊 Teknik Gösterge Özeti")
-    
-    c1, c2, c3, c4, c5 = st.columns(5)
-    
-    def get_color(val, threshold=50):
-        return "#4CAF50" if val >= threshold else "#FF5252"
-
-    score_color = get_color(row_data['Puan'], 70)
-    
-    with c1:
-        st.markdown(f"""
-        <div class="metric-box" style="border-color: {score_color};">
-            <div class="metric-title">TOPLAM PUAN</div>
-            <div class="metric-value" style="color: {score_color};">{int(row_data['Puan'])}/100</div>
         </div>
-        """, unsafe_allow_html=True)
+      </div>
+    </div>
+  );
+};
+
+export default function App() {
+  const [isRunning, setIsRunning] = useState(false);
+  const [results, setResults] = useState<StockAnalysis[]>([]);
+  const [currentProcessing, setCurrentProcessing] = useState<string>("");
+  const [progress, setProgress] = useState(0);
+  const [selectedStock, setSelectedStock] = useState<StockAnalysis | null>(null);
+  const [stocksToScan, setStocksToScan] = useState<string[]>(DEFAULT_BIST_STOCKS);
+
+  const startAnalysis = async () => {
+    setIsRunning(true);
+    setResults([]);
+    setProgress(0);
+
+    for (let i = 0; i < stocksToScan.length; i++) {
+      const stock = stocksToScan[i];
+      setCurrentProcessing(stock);
+      
+      try {
+        const result = await analyzeStockWithGemini(stock);
+        setResults(prev => [...prev, result].sort((a, b) => b.swingScore - a.swingScore));
+      } catch (error) {
+        console.error(`Error analyzing ${stock}:`, error);
+        // Continue to next stock even if one fails
+      }
+      
+      setProgress(i + 1);
+    }
+
+    setIsRunning(false);
+    setCurrentProcessing("");
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-200 font-sans flex flex-col md:flex-row">
+      
+      {/* Sidebar */}
+      <div className="w-full md:w-64 bg-slate-900 border-r border-slate-800 p-6 flex flex-col shrink-0">
+        <div className="mb-8 flex items-center gap-2 text-blue-500">
+          <LineChart size={28} />
+          <h1 className="text-xl font-bold text-white tracking-wider">BIST<span className="font-light">SWING</span></h1>
+        </div>
+
+        <div className="space-y-6">
+          <div>
+            <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 block">Settings</label>
+            <div className="bg-slate-800/50 p-3 rounded text-sm text-slate-400 mb-2">
+              <div className="flex justify-between mb-1">
+                <span>Universe:</span>
+                <span className="text-white">BIST 30+</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Count:</span>
+                <span className="text-white">{stocksToScan.length} Stocks</span>
+              </div>
+            </div>
+            <p className="text-xs text-slate-500">
+              Note: Full BIST All (XTUM) scan is limited in this demo environment.
+            </p>
+          </div>
+
+          <button
+            onClick={startAnalysis}
+            disabled={isRunning}
+            className={`w-full py-3 px-4 rounded-lg font-bold flex items-center justify-center gap-2 transition-all shadow-lg
+              ${isRunning 
+                ? 'bg-slate-700 text-slate-400 cursor-not-allowed' 
+                : 'bg-blue-600 hover:bg-blue-500 text-white hover:shadow-blue-500/20 active:scale-95'
+              }`}
+          >
+            {isRunning ? (
+              <>
+                <Loader2 className="animate-spin" size={18} />
+                Scanning...
+              </>
+            ) : (
+              <>
+                <Play size={18} fill="currentColor" />
+                Start Analysis
+              </>
+            )}
+          </button>
+        </div>
         
-    with c2:
-        st.markdown(f"""
-        <div class="metric-box">
-            <div class="metric-title">RSI (14)</div>
-            <div class="metric-value">{int(df_chart['RSI'].iloc[-1])}</div>
-            <div style="font-size: 0.8em; color: #aaa;">{status_dict.get('RSI', '-')}</div>
+        <div className="mt-auto pt-6 border-t border-slate-800">
+          <p className="text-xs text-slate-600 text-center">
+            Powered by Gemini 2.5 & Streamlit-Logic
+          </p>
         </div>
-        """, unsafe_allow_html=True)
+      </div>
 
-    with c3:
-        st.markdown(f"""
-        <div class="metric-box">
-            <div class="metric-title">MACD</div>
-            <div class="metric-value" style="font-size: 1em;">{status_dict.get('MACD', '-')}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with c4:
-        st.markdown(f"""
-        <div class="metric-box">
-            <div class="metric-title">MFI / HACİM</div>
-            <div class="metric-value" style="font-size: 1em;">{status_dict.get('MFI', '-')}</div>
-        </div>
-        """, unsafe_allow_html=True)
+      {/* Main Area */}
+      <div className="flex-1 p-6 md:p-10 overflow-y-auto">
         
-    with c5:
-        trend_color = "#4CAF50" if "Yükseliş" in status_dict.get('Trend', '') else "#FF5252"
-        st.markdown(f"""
-        <div class="metric-box">
-            <div class="metric-title">SÜPER TREND</div>
-            <div class="metric-value" style="color: {trend_color}; font-size: 1em;">{status_dict.get('Trend', '-')}</div>
-        </div>
-        """, unsafe_allow_html=True)
+        {/* Progress Section */}
+        {isRunning && (
+          <ProgressBar 
+            progress={progress} 
+            total={stocksToScan.length} 
+            currentStock={currentProcessing} 
+          />
+        )}
 
-else:
-    # Veri gelmezse boş ekran kalmasın diye
-    pass
+        {/* Empty State */}
+        {!isRunning && results.length === 0 && (
+          <div className="h-full flex flex-col items-center justify-center text-slate-500 space-y-4 min-h-[400px]">
+            <Search size={64} className="text-slate-700 mb-4" />
+            <h2 className="text-2xl font-bold text-slate-400">Ready to Scan Markets</h2>
+            <p className="max-w-md text-center">
+              Click the "Start Analysis" button to scan the BIST index using the 100-point Swing Trading Algorithm.
+            </p>
+          </div>
+        )}
+
+        {/* Results Table */}
+        {results.length > 0 && (
+          <div className="animate-in fade-in slide-in-from-bottom-4">
+             <div className="flex justify-between items-end mb-6">
+                <div>
+                  <h2 className="text-2xl font-bold text-white">Market Opportunities</h2>
+                  <p className="text-slate-400">Sorted by Swing Score (Highest to Lowest)</p>
+                </div>
+                <div className="text-sm text-slate-500">
+                  {results.length} results found
+                </div>
+             </div>
+
+             <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-xl">
+               <div className="overflow-x-auto">
+                 <table className="w-full text-left border-collapse">
+                   <thead>
+                     <tr className="bg-slate-800/50 text-slate-400 text-sm uppercase tracking-wider">
+                       <th className="p-4 font-semibold">Symbol</th>
+                       <th className="p-4 font-semibold text-right">Price</th>
+                       <th className="p-4 font-semibold text-right">Change</th>
+                       <th className="p-4 font-semibold text-center">Swing Score</th>
+                       <th className="p-4 font-semibold text-center">Action</th>
+                     </tr>
+                   </thead>
+                   <tbody className="divide-y divide-slate-800">
+                     {results.map((stock) => (
+                       <tr 
+                          key={stock.symbol} 
+                          className="hover:bg-slate-800/30 transition-colors group cursor-pointer"
+                          onClick={() => setSelectedStock(stock)}
+                       >
+                         <td className="p-4">
+                           <div className="font-bold text-white">{stock.symbol}.IS</div>
+                           <div className="text-xs text-slate-500">Borsa Istanbul</div>
+                         </td>
+                         <td className="p-4 text-right font-mono text-slate-300">
+                           {stock.price.toFixed(2)} ₺
+                         </td>
+                         <td className={`p-4 text-right font-mono font-medium ${stock.changePct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                           {stock.changePct > 0 ? '+' : ''}{stock.changePct}%
+                         </td>
+                         <td className="p-4 text-center">
+                           <ScoreBadge score={stock.swingScore} />
+                         </td>
+                         <td className="p-4 text-center">
+                           <button 
+                            onClick={(e) => { e.stopPropagation(); setSelectedStock(stock); }}
+                            className="text-blue-400 hover:text-blue-300 hover:bg-blue-900/30 p-2 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                           >
+                             Details
+                           </button>
+                         </td>
+                       </tr>
+                     ))}
+                   </tbody>
+                 </table>
+               </div>
+             </div>
+          </div>
+        )}
+      </div>
+
+      {/* Detail Modal */}
+      {selectedStock && (
+        <StockDetailView 
+          data={selectedStock} 
+          onClose={() => setSelectedStock(null)} 
+        />
+      )}
+    </div>
+  );
+}
